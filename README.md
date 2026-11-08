@@ -1,5 +1,7 @@
 # Do people actually care what an LLM costs?
 
+**Live dashboard:** [seungsukim127.github.io/llm-price-elasticity](https://seungsukim127.github.io/llm-price-elasticity/) (updated daily)
+
 When a model gets cheaper, do developers use it more? And when a free version
 shows up, does it steal paid users or bring in new ones?
 
