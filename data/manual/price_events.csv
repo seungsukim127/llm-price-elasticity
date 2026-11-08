@@ -1,0 +1,5 @@
+# Price changes that happened BEFORE the daily snapshots began (Nov 2026).
+# Fill from public trackers (e.g. Price Per Token) or provider announcements.
+# Prices are USD per 1M tokens. permaslug must match the rankings dataset id.
+# date = first day the NEW price applied (UTC).
+date,permaslug,price_in_before,price_out_before,price_in_after,price_out_after,source_url,note
