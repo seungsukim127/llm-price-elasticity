@@ -74,3 +74,16 @@ def test_collect_writes_raw_response(tmp_path, monkeypatch):
     with gzip.open(out, "rt") as f:
         saved = json.load(f)
     assert saved["data"] == fake["data"] and "_collected_at" in saved
+
+
+def test_site_builds_from_synthetic_data(tmp_path):
+    from src import build_site
+    root = tmp_path / "sim"
+    simulate.simulate(root / "raw", seed=3)
+    data = build_site.build_data(root / "raw", root / "manual", root / "processed")
+    page = build_site.render(data, tmp_path / "_site")
+    text = page.read_text(encoding="utf-8")
+    assert "{{" not in text                               # every placeholder filled
+    assert len(data["top"]) == 20
+    assert abs(sum(s["values"][-1] for s in data["share"]["series"]) - 100) < 0.5
+    assert (tmp_path / "_site" / "chart.umd.min.js").exists()

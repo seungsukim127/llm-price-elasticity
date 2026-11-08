@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<!--
+  Template for the public dashboard. src/build_site.py replaces every
+  double-curly-brace placeholder (e.g. LAST_DAY) with real values and writes the result to _site/index.html.
+  Tables are filled in by Python (they work without JavaScript);
+  the two charts are drawn in the browser by Chart.js from the embedded JSON.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM API prices &amp; usage tracker</title>
+<meta name="description" content="Daily prices and token usage for LLMs on OpenRouter, updated automatically.">
+<style>
+  /* ---- Colors: one place for light mode, one for dark mode ---- */
+  :root {
+    color-scheme: light;
+    --bg: #fcfcfb; --card: #ffffff; --line: #e6e5e1;
+    --ink: #0b0b0b; --ink-2: #52514e; --ink-3: #8a8984;
+    --accent: #2a78d6; --up: #0c7d0c; --down: #c23434;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --bg: #1a1a19; --card: #222220; --line: #383835;
+      --ink: #f0efec; --ink-2: #c3c2b7; --ink-3: #8f8e86;
+      --accent: #3987e5; --up: #3fbf3f; --down: #e66767;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 40px 20px 64px; }
+  h1 { font-size: 28px; line-height: 1.25; margin: 0 0 8px; font-weight: 650; }
+  h2 { font-size: 18px; margin: 0 0 4px; font-weight: 600; }
+  .lede { color: var(--ink-2); max-width: 680px; margin: 0 0 6px; }
+  .meta { color: var(--ink-3); font-size: 13px; margin: 0 0 28px; }
+  a { color: var(--accent); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 20px; margin-bottom: 20px; }
+  .sub { color: var(--ink-2); font-size: 13px; margin: 0 0 16px; }
+
+  /* headline numbers */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .stat { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .stat .v { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .l { color: var(--ink-2); font-size: 13px; }
+
+  .chart-box { position: relative; height: 300px; }
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin: 0 0 12px; padding: 0;
+            list-style: none; font-size: 13px; color: var(--ink-2); }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px;
+              margin-right: 6px; vertical-align: -1px; }
+
+  /* tables and lists */
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th { text-align: left; font-weight: 500; color: var(--ink-3); font-size: 12px;
+       border-bottom: 1px solid var(--line); padding: 8px 8px; white-space: nowrap; }
+  td { border-bottom: 1px solid var(--line); padding: 8px; vertical-align: top; }
+  tr:last-child td { border-bottom: 0; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th.num { text-align: right; }
+  .model { font-weight: 500; }
+  .slug { color: var(--ink-3); font-size: 12px; word-break: break-all; }
+  .muted { color: var(--ink-3); }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .badge { font-size: 11px; font-weight: 500; border: 1px solid var(--line); color: var(--ink-2);
+           border-radius: 999px; padding: 0 7px; margin-left: 6px; vertical-align: 1px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .two .card { margin-bottom: 0; }
+  .events { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+  .events li { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
+  .events li:last-child { border-bottom: 0; }
+  .events .date { color: var(--ink-3); font-variant-numeric: tabular-nums; min-width: 88px; }
+  .events .what { flex: 1; }
+  .empty { color: var(--ink-2); font-size: 14px; margin: 0; }
+  details { margin-top: 12px; font-size: 13px; color: var(--ink-2); }
+  footer { color: var(--ink-3); font-size: 13px; margin-top: 36px; line-height: 1.7; }
+  .table-scroll { overflow-x: auto; }
+  .table-scroll > table { min-width: 640px; }   /* scroll sideways on phones instead of squashing */
+
+  @media (max-width: 760px) {
+    .stats { grid-template-columns: 1fr 1fr; }
+    .two { grid-template-columns: 1fr; }
+    .two .card { margin-bottom: 20px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>LLM API prices &amp; usage tracker</h1>
+  <p class="lede">How much are developers using each AI model, and what does it cost?
+     Daily data from OpenRouter, collected automatically by a student research project
+     on how price-sensitive LLM demand is.</p>
+  <p class="meta">Usage data through {{LAST_DAY}} · page updated {{UPDATED}} ·
+     <a href="https://github.com/seungsukim127/llm-price-elasticity">code &amp; method on GitHub</a></p>
+
+  <!-- 1. Headline numbers -->
+  <section class="stats" aria-label="Headline numbers">
+    <div class="stat"><div class="v">{{TOKENS_LAST_DAY}}</div><div class="l">tokens processed on {{LAST_DAY}}</div></div>
+    <div class="stat"><div class="v">{{N_MODELS_LISTED}}</div><div class="l">models listed today ({{N_FREE}} free variants)</div></div>
+    <div class="stat"><div class="v">{{N_MODELS_SEEN}}</div><div class="l">models that reached the daily top 50 since {{FIRST_DAY}}</div></div>
+    <div class="stat"><div class="v">{{N_SNAPSHOTS}}</div><div class="l">daily price snapshots since {{TRACKING_SINCE}}</div></div>
+  </section>
+
+  <!-- 2. Market size over time -->
+  <section class="card">
+    <h2>Daily tokens on OpenRouter</h2>
+    <p class="sub">All models, prompt + completion tokens. Line = 7-day average; faint line = daily value.</p>
+    <div class="chart-box"><canvas id="marketChart" role="img"
+         aria-label="Line chart of daily tokens processed on OpenRouter since {{FIRST_DAY}}"></canvas></div>
+  </section>
+
+  <!-- 3. Who gets the tokens -->
+  <section class="card">
+    <h2>Share of tokens by model provider</h2>
+    <p class="sub">Weekly, last 12 months. "Everyone else" includes all models outside the daily top 50.</p>
+    <ul class="legend" id="shareLegend"></ul>
+    <div class="chart-box"><canvas id="shareChart" role="img"
+         aria-label="Stacked area chart of each provider's share of weekly tokens"></canvas></div>
+    <details><summary>Show as a table</summary><div class="table-scroll" id="shareTable"></div></details>
+  </section>
+
+  <!-- 4. Top models -->
+  <section class="card">
+    <h2>Most-used models on {{LAST_DAY}}</h2>
+    <p class="sub">Prices in USD per 1M tokens from today's snapshot. Change = vs. the same day a week earlier.</p>
+    <div class="table-scroll">
+    <table>
+      <thead><tr><th class="num">#</th><th>Model</th><th class="num">Tokens</th><th class="num">Share</th>
+                 <th class="num">7-day change</th><th class="num">Input $/1M</th><th class="num">Output $/1M</th></tr></thead>
+      <tbody>
+{{TOP_ROWS}}
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <!-- 5. Price changes and retirements -->
+  <div class="two">
+    <section class="card">
+      <h2>Recent price changes</h2>
+      <p class="sub">Blended price (3:1 input:output), last 90 days.</p>
+{{PRICE_CHANGES}}
+    </section>
+    <section class="card">
+      <h2>Scheduled retirements</h2>
+      <p class="sub">Models and free variants OpenRouter lists with an end date.</p>
+{{EXPIRING}}
+    </section>
+  </div>
+
+  <footer>
+    Source: OpenRouter (openrouter.ai/rankings), as of {{AS_OF}}. Usage data licensed under
+    <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>.
+    Covers developer API traffic on OpenRouter only, not consumer apps. Token counts come from each
+    provider's own tokenizer, so they are not exactly comparable across providers.<br>
+    Built by Seungsu Kim · <a href="https://github.com/seungsukim127/llm-price-elasticity">GitHub</a>
+  </footer>
+</main>
+
+<!-- Data written by build_site.py -->
+<script id="data" type="application/json">{{DATA_JSON}}</script>
+<script src="chart.umd.min.js"></script>
+<script>
+(function () {
+  const DATA = JSON.parse(document.getElementById("data").textContent);
+  if (!window.Chart) return;               // tables still work without charts
+
+  // Read colors from the CSS variables so light/dark mode stay in one place.
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+  // Fixed categorical order (validated for color-vision deficiency); "Everyone else" is gray.
+  const PALETTE = dark
+    ? ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9"]
+    : ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6"];
+  const OTHER = dark ? "#5f5e5a" : "#b4b2a9";
+
+  const fmtTokens = (x) => {
+    if (x == null) return "–";
+    for (const [u, d] of [["T", 1e12], ["B", 1e9], ["M", 1e6]]) if (Math.abs(x) >= d) return (x / d).toFixed(1) + u;
+    return Math.round(x).toString();
+  };
+
+  Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+  Chart.defaults.font.size = 12;
+  Chart.defaults.color = css("--ink-2");
+  Chart.defaults.borderColor = css("--line");
+
+  const tooltip = {
+    backgroundColor: css("--card"), titleColor: css("--ink"), bodyColor: css("--ink-2"),
+    borderColor: css("--line"), borderWidth: 1, padding: 10, boxPadding: 4,
+  };
+  const xAxis = {
+    grid: { display: false },
+    ticks: { maxTicksLimit: window.innerWidth < 600 ? 3 : 8, maxRotation: 0, autoSkip: true },
+  };
+
+  // ---- Chart 1: market size (one series, so no legend; the title names it) ----
+  new Chart(document.getElementById("marketChart"), {
+    type: "line",
+    data: {
+      labels: DATA.market.dates,
+      datasets: [
+        { label: "7-day average", data: DATA.market.avg7, borderColor: PALETTE[0],
+          borderWidth: 2, pointRadius: 0, pointHoverRadius: 4, tension: 0.2 },
+        { label: "Daily", data: DATA.market.total, borderColor: PALETTE[0] + "40",
+          borderWidth: 1, pointRadius: 0, pointHoverRadius: 0 },
+      ],
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },   // hover anywhere on a date
+      plugins: {
+        legend: { display: false },
+        tooltip: { ...tooltip, callbacks: { label: (c) => ` ${c.dataset.label}: ${fmtTokens(c.parsed.y)} tokens` } },
+      },
+      scales: {
+        x: xAxis,
+        y: { beginAtZero: true, border: { display: false },
+             ticks: { callback: (v) => fmtTokens(v), maxTicksLimit: 5 } },
+      },
+    },
+  });
+
+  // ---- Chart 2: provider share, 100% stacked area ----
+  const series = DATA.share.series;
+  const colorOf = (i, name) => (name === "Everyone else" ? OTHER : PALETTE[i % PALETTE.length]);
+  new Chart(document.getElementById("shareChart"), {
+    type: "line",
+    data: {
+      labels: DATA.share.dates,
+      datasets: series.map((s, i) => ({
+        label: s.name, data: s.values, fill: i === 0 ? "origin" : "-1",
+        backgroundColor: colorOf(i, s.name), borderColor: css("--card"), borderWidth: 1,
+        pointRadius: 0, pointHoverRadius: 0, tension: 0.2,
+      })),
+    },
+    options: {
+      maintainAspectRatio: false,
+      interaction: { mode: "index", intersect: false },
+      plugins: {
+        legend: { display: false },     // custom HTML legend below the title
+        tooltip: { ...tooltip, itemSort: (a, b) => b.datasetIndex - a.datasetIndex,
+                   callbacks: { label: (c) => ` ${c.dataset.label}: ${c.parsed.y.toFixed(1)}%` } },
+      },
+      scales: {
+        x: xAxis,
+        y: { stacked: true, min: 0, max: 100, border: { display: false },
+             ticks: { callback: (v) => v + "%", stepSize: 25 } },
+      },
+    },
+  });
+
+  // Legend + table view for chart 2 (so identity never depends on color alone)
+  document.getElementById("shareLegend").innerHTML = series
+    .map((s, i) => `<li><i style="background:${colorOf(i, s.name)}"></i>${s.name}</li>`).join("");
+  const last = DATA.share.dates.length - 1;
+  const rows = series.map((s) =>
+    `<tr><td>${s.name}</td><td class="num">${s.values[0].toFixed(1)}%</td><td class="num">${s.values[last].toFixed(1)}%</td></tr>`).join("");
+  document.getElementById("shareTable").innerHTML =
+    `<table><thead><tr><th>Provider</th><th class="num">Week of ${DATA.share.dates[0]}</th>` +
+    `<th class="num">Week of ${DATA.share.dates[last]}</th></tr></thead><tbody>${rows}</tbody></table>`;
+})();
+</script>
+</body>
+</html>

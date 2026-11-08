@@ -9,3 +9,5 @@ data_demo/
 # processed tables are rebuilt from data/raw (keep the raw snapshots in git)
 data/processed/*
 !data/processed/.gitkeep
+# built dashboard (published by .github/workflows/site.yml, not committed)
+_site/
