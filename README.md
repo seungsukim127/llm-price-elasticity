@@ -66,7 +66,10 @@ truncation, launches, and free-variant changes. The pipeline recovers it:
 | **Truth** | **−1.20** | |
 
 ![cross vs within](docs/demo_fig1_cross_vs_within.png)
+*Synthetic data with a planted elasticity of -1.2, not OpenRouter results.*
+
 ![event study](docs/demo_fig2_price_event_study.png)
+*Synthetic data: 13 simulated price cuts.*
 
 Across five other random seeds the within-model and event-study estimates stay in
 [−1.06, −1.37] while the cross-model estimate stays in [−0.20, −0.35].
