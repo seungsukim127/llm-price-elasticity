@@ -98,7 +98,7 @@ def build_data(raw: Path, manual: Path, processed: Path) -> dict:
     recent = usage[usage.date > last_day - pd.Timedelta(days=364)]
     by_prov = recent.pivot_table(index="date", columns="provider", values="tokens", aggfunc="sum").fillna(0.0)
     named = (by_prov.drop(columns=["Outside top 50"], errors="ignore")
-             .iloc[-28:].sum().sort_values(ascending=False).index[:TOP_PROVIDERS].tolist())
+             .sum().sort_values(ascending=False).index[:TOP_PROVIDERS].tolist())
     weekly = by_prov.rolling(7, min_periods=7).sum().iloc[::-7].iloc[::-1].dropna()
     share = pd.DataFrame(index=weekly.index)
     for p in named:
