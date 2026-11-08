@@ -41,7 +41,7 @@ DATASET_FLOOR = dt.date(2025, 1, 1)  # rankings dataset starts here
 MAX_SPAN_DAYS = 366                  # API limit on one request window
 HEADERS = {
     # OpenRouter's optional attribution headers; identify the project, not a person.
-    "HTTP-Referer": "https://github.com/llm-price-elasticity",
+    "HTTP-Referer": "https://github.com/seungsukim127/llm-price-elasticity",
     "X-Title": "llm-price-elasticity research collector",
 }
 
