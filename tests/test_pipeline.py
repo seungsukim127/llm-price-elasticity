@@ -17,6 +17,8 @@ def built(tmp_path_factory):
     return truth, tables
 
 
+# Within-model must land near the truth; cross-model must miss it by a lot,
+# which also confirms that the simulation's confound is strong enough to matter.
 def test_within_beats_cross(built):
     truth, t = built
     cross = est.cross_model(t["panel"]).coef["log_p"]
