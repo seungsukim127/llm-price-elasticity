@@ -1,3 +1,4 @@
+
 .PHONY: install demo test backfill panel analysis
 
 # Install Python libraries (pandas, numpy, statsmodels, matplotlib, etc.)
@@ -11,6 +12,7 @@ demo:
 	python -m src.build_panel --raw data_demo/raw --out data_demo/processed --manual data_demo/manual
 	python -m src.run_analysis --processed data_demo/processed --figures data_demo/figures
 
+# Automatic pass/fail check
 test:
 	python -m pytest -q
 
@@ -18,6 +20,7 @@ test:
 backfill:
 	python -m src.collect backfill
 
+# Turn raw API snapshots in data/raw into analysis tables in data/processed.
 panel:
 	python -m src.build_panel
 
