@@ -1,5 +1,6 @@
 .PHONY: install demo test backfill panel analysis
 
+# Install Python libraries (pandas, numpy, statsmodels, matplotlib, etc.)
 install:
 	pip install -r requirements.txt
 
