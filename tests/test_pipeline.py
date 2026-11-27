@@ -87,9 +87,14 @@ def test_site_builds_from_synthetic_data(tmp_path):
     page = build_site.render(data, tmp_path / "_site")
     text = page.read_text(encoding="utf-8")
     assert "{{" not in text                               # every placeholder filled
-    assert len(data["top"]) == 20
+    assert len(data["top"]) == build_site.TABLE_ROWS
     assert abs(sum(s["values"][-1] for s in data["share"]["series"]) - 100) < 0.5
     assert (tmp_path / "_site" / "chart.umd.min.js").exists()
+    # per-model history for the detail chart: one series per table row, on the shared date axis
+    hist = json.loads((tmp_path / "_site" / "models.json").read_text(encoding="utf-8"))
+    assert set(hist["models"]) == {r["slug"] for r in data["top"]}
+    assert all(len(m["tokens"]) == len(hist["dates"]) == len(m["price"]) for m in hist["models"].values())
+    assert '"history":' not in text                        # kept out of the page's embedded data
 
 
 # Issue #2: a short price spell that comes back is noise; only a move from one
