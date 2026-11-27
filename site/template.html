@@ -64,10 +64,44 @@
   .slug { color: var(--ink-3); font-size: 12px; word-break: break-all; }
   .muted { color: var(--ink-3); }
   .up { color: var(--up); } .down { color: var(--down); }
+  .chg { color: var(--ink-2); }
+
+  /* controls: range buttons, search, model picker */
+  .head-row { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+              gap: 8px 16px; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .seg button, .btn { font: inherit; font-size: 13px; color: var(--ink-2); background: var(--card);
+                      border: 0; padding: 0 12px; min-height: 32px; cursor: pointer; }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+  .btn { border: 1px solid var(--line); border-radius: 8px; }
+  .btn[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+  input[type="search"], select { font: inherit; font-size: 14px; color: var(--ink); background: var(--card);
+                                 border: 1px solid var(--line); border-radius: 8px; padding: 0 10px;
+                                 min-height: 36px; max-width: 100%; }
+  input[type="search"] { width: 220px; }
+  select { min-width: 0; width: 320px; }
+  button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  .count { color: var(--ink-3); font-size: 13px; }
+
+  /* sortable table headers */
+  th button.sort { font: inherit; color: inherit; background: none; border: 0; padding: 0;
+                   cursor: pointer; white-space: nowrap; }
+  th button.sort::after { content: " \2195"; opacity: 0.35; }
+  th[aria-sort="ascending"] button.sort::after { content: " \2191"; opacity: 1; }
+  th[aria-sort="descending"] button.sort::after { content: " \2193"; opacity: 1; }
+  th[aria-sort] { color: var(--ink); }
+  a.model-link { color: var(--ink); text-decoration: none; }
+  a.model-link:hover { color: var(--accent); text-decoration: underline; }
+  tr.is-hidden { display: none; }
+  tr.is-selected td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .badge { font-size: 11px; font-weight: 500; border: 1px solid var(--line); color: var(--ink-2);
            border-radius: 999px; padding: 0 7px; margin-left: 6px; vertical-align: 1px; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
   .two .card { margin-bottom: 0; }
+  .two > * { min-width: 0; }
   .events { list-style: none; margin: 0; padding: 0; font-size: 14px; }
   .events li { display: flex; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
   .events li:last-child { border-bottom: 0; }
@@ -83,6 +117,10 @@
     .stats { grid-template-columns: 1fr 1fr; }
     .two { grid-template-columns: 1fr; }
     .two .card { margin-bottom: 20px; }
+    input[type="search"], select { width: 100%; }
+    /* price changes: put the price on its own line instead of pushing the page wider */
+    .events li { flex-wrap: wrap; row-gap: 2px; }
+    .events .chg { flex-basis: 100%; padding-left: 100px; text-align: left; }
   }
 </style>
 </head>
@@ -106,7 +144,16 @@
   <!-- 2. Market size over time -->
   <section class="card">
     <h2>Daily tokens on OpenRouter</h2>
-    <p class="sub">All models, prompt + completion tokens. Line = 7-day average; faint line = daily value.</p>
+    <p class="sub">All models, prompt + completion tokens. Line = 7-day average; faint line = daily value.
+       Log scale makes early growth visible.</p>
+    <div class="controls">
+      <div class="seg" id="marketRange" role="group" aria-label="Time range">
+        <button type="button" data-days="90">3M</button><button type="button" data-days="365" aria-pressed="true">1Y</button><button type="button" data-days="0">All</button>
+      </div>
+      <div class="seg" id="marketScale" role="group" aria-label="Vertical scale">
+        <button type="button" data-scale="linear" aria-pressed="true">Linear</button><button type="button" data-scale="logarithmic">Log</button>
+      </div>
+    </div>
     <div class="chart-box"><canvas id="marketChart" role="img"
          aria-label="Line chart of daily tokens processed on OpenRouter since {{FIRST_DAY}}"></canvas></div>
   </section>
@@ -124,11 +171,24 @@
   <!-- 4. Top models -->
   <section class="card">
     <h2>Most-used models on {{LAST_DAY}}</h2>
-    <p class="sub">Prices in USD per 1M tokens from today's snapshot. Change = vs. the same day a week earlier.</p>
+    <p class="sub">Top {{TABLE_ROWS}} models. Prices in USD per 1M tokens from today's snapshot. Change = vs. the same
+       day a week earlier. Click a column to sort, or a model to see its price and usage over time.</p>
+    <div class="controls">
+      <input type="search" id="modelSearch" placeholder="Search models" aria-label="Search models">
+      <button type="button" class="btn" id="showAll" aria-pressed="false">Show all {{TABLE_ROWS}}</button>
+      <span class="count" id="rowCount" aria-live="polite"></span>
+    </div>
     <div class="table-scroll">
-    <table>
-      <thead><tr><th class="num">#</th><th>Model</th><th class="num">Tokens</th><th class="num">Share</th>
-                 <th class="num">7-day change</th><th class="num">Input $/1M</th><th class="num">Output $/1M</th></tr></thead>
+    <table id="topTable">
+      <thead><tr>
+        <th class="num"><button type="button" class="sort" data-key="rank">#</button></th>
+        <th><button type="button" class="sort" data-key="name">Model</button></th>
+        <th class="num"><button type="button" class="sort" data-key="tokens">Tokens</button></th>
+        <th class="num"><button type="button" class="sort" data-key="share">Share</button></th>
+        <th class="num"><button type="button" class="sort" data-key="change">7-day change</button></th>
+        <th class="num"><button type="button" class="sort" data-key="pin">Input $/1M</button></th>
+        <th class="num"><button type="button" class="sort" data-key="pout">Output $/1M</button></th>
+      </tr></thead>
       <tbody>
 {{TOP_ROWS}}
       </tbody>
@@ -136,11 +196,29 @@
     </div>
   </section>
 
-  <!-- 5. Price changes and retirements -->
+  <!-- 5. One model: price and usage over time -->
+  <section class="card" id="detail">
+    <h2>Price and usage of one model</h2>
+    <p class="sub">Daily tokens (left axis) and blended price, 3:1 input:output (right axis).
+       Prices are tracked from {{TRACKING_SINCE}}, so earlier days show usage only.
+       &#9660;/&#9650; mark price cuts/increases that held for 7+ days.</p>
+    <div class="controls">
+      <select id="modelSelect" aria-label="Model"></select>
+      <div class="seg" id="detailRange" role="group" aria-label="Time range">
+        <button type="button" data-days="30">1M</button><button type="button" data-days="90" aria-pressed="true">3M</button><button type="button" data-days="365">1Y</button><button type="button" data-days="0">All</button>
+      </div>
+    </div>
+    <div class="chart-box"><canvas id="detailChart" role="img" aria-label="Price and usage of the selected model"></canvas></div>
+    <p class="sub" id="detailNote" aria-live="polite" style="margin:12px 0 0">Loading model history&hellip;</p>
+    <noscript><p class="empty">This chart needs JavaScript.</p></noscript>
+  </section>
+
+  <!-- 6. Price changes and retirements -->
   <div class="two">
     <section class="card">
       <h2>Recent price changes</h2>
-      <p class="sub">Blended price (3:1 input:output), last 90 days.</p>
+      <p class="sub">Blended price (3:1 input:output), last 90 days. Counted only when the new price
+         held for 7+ days.</p>
 {{PRICE_CHANGES}}
     </section>
     <section class="card">
@@ -161,11 +239,76 @@
 
 <!-- Data written by build_site.py -->
 <script id="data" type="application/json">{{DATA_JSON}}</script>
+<script>
+// Top-models table: sort, search, show all. Runs even if the charts fail to load.
+(function () {
+  const table = document.getElementById("topTable");
+  if (!table) return;
+  const tbody = table.tBodies[0];
+  const rows = Array.from(tbody.rows);
+  const search = document.getElementById("modelSearch");
+  const showAll = document.getElementById("showAll");
+  const count = document.getElementById("rowCount");
+  const DEFAULT_ROWS = 20;
+  let sortKey = "rank", sortDir = 1;
+
+  const value = (tr, key) => {
+    const v = tr.dataset[key];
+    if (key === "name") return v;
+    return v === "" ? null : Number(v);
+  };
+
+  function apply() {
+    const q = search.value.trim().toLowerCase();
+    const all = showAll.getAttribute("aria-pressed") === "true";
+    rows.sort((a, b) => {
+      const x = value(a, sortKey), y = value(b, sortKey);
+      if (x === null && y === null) return 0;
+      if (x === null) return 1;            // empty values always last
+      if (y === null) return -1;
+      return (x < y ? -1 : x > y ? 1 : 0) * sortDir;
+    });
+    let shown = 0;
+    rows.forEach((tr) => {
+      const match = !q || tr.dataset.name.includes(q) || tr.dataset.slug.toLowerCase().includes(q);
+      const visible = match && (q || all || shown < DEFAULT_ROWS);
+      tr.classList.toggle("is-hidden", !visible);
+      if (visible) shown += 1;
+      tbody.appendChild(tr);
+    });
+    count.textContent = q ? `${shown} of ${rows.length} match` : `Showing ${shown} of ${rows.length}`;
+    table.querySelectorAll("th").forEach((th) => {
+      const b = th.querySelector("button.sort");
+      if (b && b.dataset.key === sortKey) th.setAttribute("aria-sort", sortDir > 0 ? "ascending" : "descending");
+      else th.removeAttribute("aria-sort");
+    });
+  }
+
+  table.querySelectorAll("button.sort").forEach((b) => b.addEventListener("click", () => {
+    const key = b.dataset.key;
+    if (key === sortKey) sortDir = -sortDir;
+    else { sortKey = key; sortDir = (key === "rank" || key === "name") ? 1 : -1; }  // numbers: biggest first
+    apply();
+  }));
+  search.addEventListener("input", apply);
+  showAll.addEventListener("click", () => {
+    const on = showAll.getAttribute("aria-pressed") !== "true";
+    showAll.setAttribute("aria-pressed", String(on));
+    showAll.textContent = on ? "Show top 20" : `Show all ${rows.length}`;
+    apply();
+  });
+  apply();
+})();
+</script>
 <script src="chart.umd.min.js"></script>
 <script>
 (function () {
   const DATA = JSON.parse(document.getElementById("data").textContent);
-  if (!window.Chart) return;               // tables still work without charts
+  if (!window.Chart) {                     // tables still work without charts
+    const note = document.getElementById("detailNote");
+    if (note) note.textContent = "Charts could not be loaded.";
+    return;
+  }
 
   // Read colors from the CSS variables so light/dark mode stay in one place.
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
@@ -197,8 +340,19 @@
     ticks: { maxTicksLimit: window.innerWidth < 600 ? 3 : 8, maxRotation: 0, autoSkip: true },
   };
 
+  // Shared helpers for the time-range buttons.
+  const setPressed = (group, btn) =>
+    group.querySelectorAll("button").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  const startIndex = (dates, days) => {
+    if (!days) return 0;
+    const end = new Date(dates[dates.length - 1]);
+    const from = new Date(end.getTime() - (days - 1) * 86400000).toISOString().slice(0, 10);
+    const i = dates.findIndex((d) => d >= from);
+    return i < 0 ? 0 : i;
+  };
+
   // ---- Chart 1: market size (one series, so no legend; the title names it) ----
-  new Chart(document.getElementById("marketChart"), {
+  const marketChart = new Chart(document.getElementById("marketChart"), {
     type: "line",
     data: {
       labels: DATA.market.dates,
@@ -218,11 +372,41 @@
       },
       scales: {
         x: xAxis,
-        y: { beginAtZero: true, border: { display: false },
+        y: { type: "linear", beginAtZero: true, border: { display: false },
              ticks: { callback: (v) => fmtTokens(v), maxTicksLimit: 5 } },
       },
     },
   });
+
+  const market = { days: 365, scale: "linear" };
+  function drawMarket() {
+    const i = startIndex(DATA.market.dates, market.days);
+    marketChart.data.labels = DATA.market.dates.slice(i);
+    marketChart.data.datasets[0].data = DATA.market.avg7.slice(i);
+    marketChart.data.datasets[1].data = DATA.market.total.slice(i);
+    const y = marketChart.options.scales.y;
+    y.type = market.scale;
+    y.beginAtZero = market.scale === "linear";
+    if (market.scale === "logarithmic") {
+      // label powers of ten only, so log ticks stay readable
+      y.ticks.callback = (v) => {
+        const e = Math.log10(v);
+        return Math.abs(e - Math.round(e)) < 1e-9 ? fmtTokens(v) : "";
+      };
+    } else {
+      y.ticks.callback = (v) => fmtTokens(v);
+    }
+    marketChart.update();
+  }
+  const marketRange = document.getElementById("marketRange");
+  marketRange.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    market.days = Number(b.dataset.days); setPressed(marketRange, b); drawMarket();
+  }));
+  const marketScale = document.getElementById("marketScale");
+  marketScale.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    market.scale = b.dataset.scale; setPressed(marketScale, b); drawMarket();
+  }));
+  drawMarket();
 
   // ---- Chart 2: provider share, 100% stacked area ----
   const series = DATA.share.series;
@@ -262,6 +446,102 @@
   document.getElementById("shareTable").innerHTML =
     `<table><thead><tr><th>Provider</th><th class="num">Week of ${DATA.share.dates[0]}</th>` +
     `<th class="num">Week of ${DATA.share.dates[last]}</th></tr></thead><tbody>${rows}</tbody></table>`;
+
+  // ---- Chart 3: one model's daily tokens and price (history loaded from models.json) ----
+  const select = document.getElementById("modelSelect");
+  const note = document.getElementById("detailNote");
+  const detailRange = document.getElementById("detailRange");
+  const detail = { slug: DATA.top.length ? DATA.top[0].slug : null, days: 90 };
+  const nameOf = {};
+  DATA.top.forEach((r) => { nameOf[r.slug] = r.name; });
+  select.innerHTML = DATA.top.map((r) => `<option value="${r.slug}">${r.rank}. ${r.name}</option>`).join("");
+  const fmtPrice = (p) => (p == null ? "–" : p === 0 ? "Free" : "$" + (p >= 0.1 ? p.toFixed(2) : p.toFixed(3)));
+  let HIST = null, detailChart = null;
+
+  function drawDetail() {
+    if (!HIST || !detail.slug) return;
+    const m = HIST.models[detail.slug];
+    if (!m) { note.textContent = "No history for this model."; return; }
+    const i = startIndex(HIST.dates, detail.days);
+    const labels = HIST.dates.slice(i);
+    const tokens = m.tokens.slice(i), price = m.price.slice(i);
+    const byDate = {};
+    m.events.forEach((e) => { byDate[e.date] = e; });
+    const marks = labels.map((d, k) => (byDate[d] ? price[k] : null));
+    const evAt = labels.map((d) => byDate[d] || null);
+    const priced = price.filter((p) => p != null);
+
+    const cfg = {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          { label: "Tokens", data: tokens, yAxisID: "y", borderColor: PALETTE[0], borderWidth: 2,
+            pointRadius: 0, pointHoverRadius: 4, tension: 0.2, spanGaps: false },
+          { label: "Price", data: price, yAxisID: "y2", borderColor: PALETTE[1], borderWidth: 2,
+            stepped: true, pointRadius: 0, pointHoverRadius: 4, spanGaps: false },
+          { label: "Price change", data: marks, yAxisID: "y2", showLine: false,
+            pointStyle: "triangle", pointRadius: 7, pointHoverRadius: 8,
+            pointRotation: (c) => (evAt[c.dataIndex] && evAt[c.dataIndex].pct < 0 ? 180 : 0),
+            backgroundColor: css("--ink"), borderColor: css("--card"), borderWidth: 1 },
+        ],
+      },
+      options: {
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: true, position: "top", align: "start",
+                    labels: { boxWidth: 10, boxHeight: 10, usePointStyle: true, padding: 12 } },
+          tooltip: { ...tooltip, filter: (c) => c.raw != null, callbacks: {
+            label: (c) => {
+              if (c.datasetIndex === 0) return ` Tokens: ${fmtTokens(c.parsed.y)}`;
+              if (c.datasetIndex === 1) return ` Price: ${fmtPrice(c.parsed.y)} per 1M`;
+              const e = evAt[c.dataIndex];
+              return ` ${e.pct < 0 ? "\u25BC Price cut" : "\u25B2 Price increase"}: ${fmtPrice(e.before)} \u2192 ${fmtPrice(e.after)} (${e.pct > 0 ? "+" : ""}${e.pct.toFixed(0)}%)`;
+            } } },
+        },
+        scales: {
+          x: { ...xAxis },
+          y: { position: "left", beginAtZero: true, border: { display: false },
+               title: { display: true, text: "Tokens per day" },
+               ticks: { callback: (v) => fmtTokens(v), maxTicksLimit: 5 } },
+          y2: { position: "right", beginAtZero: true, border: { display: false },
+                grid: { drawOnChartArea: false },
+                title: { display: true, text: "$ per 1M tokens" },
+                ticks: { callback: (v) => fmtPrice(v), maxTicksLimit: 5 } },
+        },
+      },
+    };
+    if (detailChart) detailChart.destroy();
+    detailChart = new Chart(document.getElementById("detailChart"), cfg);
+    document.getElementById("detailChart").setAttribute("aria-label",
+      `Daily tokens and blended price of ${nameOf[detail.slug] || detail.slug}`);
+
+    const nEv = m.events.length;
+    note.textContent = (priced.length ? "" : "No price observed in this range. ") +
+      (nEv ? `${nEv} price change${nEv > 1 ? "s" : ""} since tracking started.`
+           : "No price change since tracking started.") +
+      " Gaps in the token line are days the model was outside the daily top 50.";
+    document.querySelectorAll("#topTable tbody tr").forEach((tr) =>
+      tr.classList.toggle("is-selected", tr.dataset.slug === detail.slug));
+  }
+
+  function choose(slug) {
+    if (!(slug in nameOf)) return;
+    detail.slug = slug; select.value = slug; drawDetail();
+  }
+  select.addEventListener("change", () => choose(select.value));
+  detailRange.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => {
+    detail.days = Number(b.dataset.days); setPressed(detailRange, b); drawDetail();
+  }));
+  document.querySelectorAll("a.model-link").forEach((a) => a.addEventListener("click", () => {
+    choose(a.dataset.slug);              // the href="#detail" then scrolls to the chart
+  }));
+
+  fetch("models.json")
+    .then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); })
+    .then((h) => { HIST = h; drawDetail(); })
+    .catch(() => { note.textContent = "Model history could not be loaded."; });
 })();
 </script>
 </body>
