@@ -1,5 +1,5 @@
 
-.PHONY: install demo test backfill panel analysis
+.PHONY: install demo test backfill panel analysis db
 
 # Install Python libraries (pandas, numpy, statsmodels, matplotlib, etc.)
 install:
@@ -23,6 +23,10 @@ backfill:
 # Turn raw API snapshots in data/raw into analysis tables in data/processed.
 panel:
 	python -m src.build_panel
+
+# Load data/raw into a DuckDB database (data/processed/llm.duckdb) with SQL.
+db:
+	python -m src.build_db
 
 analysis: panel
 	python -m src.run_analysis
