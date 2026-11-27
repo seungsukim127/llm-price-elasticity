@@ -5,7 +5,8 @@
 
 The page is fully static: data is embedded as JSON, charts are drawn by a
 vendored copy of Chart.js (site/assets/), so it works on GitHub Pages with no
-server and no third-party CDN.
+server and no third-party CDN. Per-model daily history for the model detail
+chart is written to a separate models.json that the page loads on demand.
 
 Reading order for the code: build_data() gathers numbers -> render() fills
 site/template.html -> the browser draws the two charts.
@@ -28,7 +29,7 @@ from src import build_panel as bp
 ROOT = Path(__file__).resolve().parents[1]
 SITE_SRC = ROOT / "site"
 TOP_PROVIDERS = 7          # stacked chart: 7 named providers + "Everyone else"
-TABLE_ROWS = 20
+TABLE_ROWS = 50           # top models in the table; each also gets a detail chart
 PRICE_EVENT_DAYS = 90
 
 
@@ -76,6 +77,37 @@ def _fmt_price(p) -> str:
     if p == 0:
         return "Free"
     return f"${p:,.2f}" if p >= 0.1 else f"${p:,.3f}"
+
+
+def _sig3(x: float) -> float:
+    """Round to 3 significant digits to keep models.json small."""
+    return float(f"{x:.3g}")
+
+
+def _model_history(slugs: list[str], usage: pd.DataFrame, prices: pd.DataFrame,
+                   price_events: pd.DataFrame) -> dict:
+    """Daily tokens and blended price per model, on one shared date axis.
+    Prices are observed ones only (snapshot, ffill, manual); 'assumed' days are null."""
+    dates = pd.date_range(usage.date.min(), usage.date.max(), freq="D")
+    tok = (usage[usage.permaslug.isin(slugs)]
+           .pivot_table(index="date", columns="permaslug", values="tokens", aggfunc="sum")
+           .reindex(dates))
+    seen = prices[prices.permaslug.isin(slugs) & prices.price_source.isin(["snapshot", "ffill", "manual"])]
+    pri = (seen.pivot_table(index="date", columns="permaslug", values="price_blend", aggfunc="last")
+           .reindex(dates))
+    out = {}
+    for slug in slugs:
+        t = tok[slug] if slug in tok else pd.Series(index=dates, dtype=float)
+        p = pri[slug] if slug in pri else pd.Series(index=dates, dtype=float)
+        ev = price_events[price_events.permaslug == slug] if len(price_events) else price_events
+        out[slug] = {
+            "tokens": [None if pd.isna(x) else _sig3(x) for x in t.values],
+            "price": [None if pd.isna(x) else round(float(x), 6) for x in p.values],
+            "events": [{"date": str(e.date.date()), "before": round(float(e.p_before), 6),
+                        "after": round(float(e.p_after), 6), "pct": round((np.exp(e.dlogp) - 1) * 100, 1)}
+                       for e in ev.itertuples(index=False)],
+        }
+    return {"dates": [str(d.date()) for d in dates], "models": out}
 
 
 def build_data(raw: Path, manual: Path, processed: Path) -> dict:
@@ -158,6 +190,9 @@ def build_data(raw: Path, manual: Path, processed: Path) -> dict:
                   "series": [{"name": c, "values": [round(float(v), 2) for v in share[c].values]}
                              for c in share.columns]},
         "top": rows, "price_changes": price_changes, "expiring": expiring,
+        # Written to models.json by render(), not embedded in the page.
+        "history": _model_history([r["slug"] for r in rows], usage, tables["prices"],
+                                  tables["price_events"]),
     }
 
 
@@ -171,9 +206,13 @@ def _top_table(rows: list[dict]) -> str:
         ch_txt = "&mdash;" if ch is None else f"{'+' if ch >= 0 else '−'}{abs(ch):.0f}%"
         ch_cls = "" if ch is None else ("up" if ch >= 0 else "down")
         badge = ' <span class="badge">free</span>' if r["free"] else ""
+        attrs = {"rank": r["rank"], "name": r["name"].lower(), "tokens": r["tokens"], "share": r["share"],
+                 "change": ch, "pin": r["price_in"], "pout": r["price_out"]}
+        data = " ".join(f"data-{k}='{html.escape(str('' if v is None else v))}'" for k, v in attrs.items())
         out.append(
-            f"<tr><td class='num muted'>{r['rank']}</td>"
-            f"<td><div class='model'>{html.escape(r['name'])}{badge}</div>"
+            f"<tr {data} data-slug='{html.escape(r['slug'])}'><td class='num muted'>{r['rank']}</td>"
+            f"<td><div class='model'><a class='model-link' href='#detail' "
+            f"data-slug='{html.escape(r['slug'])}'>{html.escape(r['name'])}</a>{badge}</div>"
             f"<div class='slug'>{html.escape(r['slug'])}</div></td>"
             f"<td class='num'>{_fmt_tokens(r['tokens'])}</td>"
             f"<td class='num'>{r['share']:.1f}%</td>"
@@ -190,11 +229,13 @@ def _price_list(items: list[dict], tracking_since: str) -> str:
                 f"two consecutive snapshots differ.</p>")
     li = []
     for e in items[:15]:
-        arrow = "down" if e["pct"] < 0 else "up"
+        # Neutral color: a price cut is good for buyers and bad for sellers, so
+        # red/green would take a side. The arrow and sign carry the direction.
+        arrow, word = ("▼", "cut") if e["pct"] < 0 else ("▲", "increase")
         li.append(f"<li><span class='date'>{e['date']}</span>"
                   f"<span class='what'>{html.escape(e['name'])}</span>"
-                  f"<span class='num {arrow}'>{_fmt_price(e['before'])} → {_fmt_price(e['after'])} "
-                  f"({'+' if e['pct'] >= 0 else '−'}{abs(e['pct']):.0f}%)</span></li>")
+                  f"<span class='num chg' aria-label='price {word}'>{arrow} {_fmt_price(e['before'])} → "
+                  f"{_fmt_price(e['after'])} ({'+' if e['pct'] >= 0 else '−'}{abs(e['pct']):.0f}%)</span></li>")
     return "<ul class='events'>" + "\n".join(li) + "</ul>"
 
 
@@ -212,7 +253,9 @@ def _expiring_list(items: list[dict]) -> str:
 def render(data: dict, out: Path) -> Path:
     out.mkdir(parents=True, exist_ok=True)
     tpl = (SITE_SRC / "template.html").read_text(encoding="utf-8")
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    history = data.get("history", {"dates": [], "models": {}})
+    page_data = {k: v for k, v in data.items() if k != "history"}
+    payload = json.dumps(page_data, ensure_ascii=False).replace("</", "<\\/")
     fills = {
         "{{DATA_JSON}}": payload,
         "{{UPDATED}}": html.escape(data["updated"]),
@@ -224,6 +267,7 @@ def render(data: dict, out: Path) -> Path:
         "{{N_FREE}}": str(data["n_free"]),
         "{{N_MODELS_SEEN}}": str(data["n_models_seen"]),
         "{{N_SNAPSHOTS}}": str(data["n_snapshots"]),
+        "{{TABLE_ROWS}}": str(len(data["top"])),
         "{{TRACKING_SINCE}}": html.escape(data["tracking_since"]),
         "{{TOP_ROWS}}": _top_table(data["top"]),
         "{{PRICE_CHANGES}}": _price_list(data["price_changes"], data["tracking_since"]),
@@ -233,6 +277,7 @@ def render(data: dict, out: Path) -> Path:
         tpl = tpl.replace(k, v)
     (out / "index.html").write_text(tpl, encoding="utf-8")
     shutil.copy(SITE_SRC / "assets" / "chart.umd.min.js", out / "chart.umd.min.js")
+    (out / "models.json").write_text(json.dumps(history, separators=(",", ":")), encoding="utf-8")
     print(f"[site] {out / 'index.html'} ({len(tpl) / 1024:.0f} KB), data through {data['last_day']}")
     return out / "index.html"
 
