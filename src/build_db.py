@@ -117,7 +117,7 @@ def build_db(raw: Path, out: Path) -> duckdb.DuckDBPyConnection:
         WHERE u.permaslug <> 'other'
     """)
 
-        # Price changes: a change counts only when a model moves from one stable
+    # Price changes: a change counts only when a model moves from one stable
     # price to another (issue #2). A run is a stretch of snapshots at about the
     # same price with no gap over MAX_GAP_DAYS; a run is stable if it spans
     # MIN_HOLD_DAYS days or more. Short spells in between are skipped as noise.
