@@ -1,18 +1,22 @@
 """Collect raw OpenRouter snapshots.
 
-Two sources, both saved *unmodified* (gzipped JSON) so that parsing bugs or
+Three sources, all saved *unmodified* (gzipped JSON) so that parsing bugs or
 API schema changes never destroy information:
 
 * Models API  (GET /api/v1/models)                 -> current prices only.
   Price history exists only because we snapshot it every day.
 * Rankings API (GET /api/v1/datasets/rankings-daily) -> daily token totals for
   the top-50 models (+ one aggregated "other" row). History back to 2025-01-01.
+* Endpoints API (GET /api/v1/models/{author}/{slug}/endpoints) -> per-provider
+  prices for one model. Snapshot daily for the latest top-50 models and any model
+  whose listed price changed, to explain listed-price jumps (issues #2, #21).
 
 Usage
 -----
-    python -m src.collect daily              # models snapshot + last 7 days of rankings
+    python -m src.collect daily              # models + last 7 days of rankings + endpoints
     python -m src.collect backfill           # rankings from 2025-01-01 to yesterday
     python -m src.collect backfill --start 2026-01-01
+    python -m src.collect endpoints          # per-provider prices (needs today's models snapshot)
 
 Environment
 -----------
@@ -39,6 +43,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RAW = ROOT / "data" / "raw"
 DATASET_FLOOR = dt.date(2025, 1, 1)  # rankings dataset starts here
 MAX_SPAN_DAYS = 366                  # API limit on one request window
+ENDPOINTS_TOP_N = 50                 # top models by usage to snapshot per-provider prices for
+ENDPOINTS_MAX = 100                  # cap on endpoint requests per run
 HEADERS = {
     # OpenRouter's optional attribution headers; identify the project, not a person.
     "HTTP-Referer": "https://github.com/seungsukim127/llm-price-elasticity",
@@ -124,9 +130,83 @@ def backfill(start: dt.date = DATASET_FLOOR, end: dt.date | None = None) -> list
     return outs
 
 
+# --------------------------------------------------------------------------- #
+# Endpoints (per-provider prices)
+# --------------------------------------------------------------------------- #
+def _read_gz_json(path: Path) -> dict:
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _base(model_id: str) -> str:
+    """Model id without its ':variant' suffix."""
+    return model_id.split(":", 1)[0]
+
+
+def endpoint_targets(today: dt.date) -> list[str]:
+    """Model ids (without ':variant') to snapshot per-provider prices for:
+    the latest top-N models by usage, plus any model whose listed price changed
+    since the previous models snapshot."""
+    cur_path = RAW / "models" / f"{today.isoformat()}.json.gz"
+    if not cur_path.exists():
+        raise RuntimeError(f"No models snapshot for {today}; run snapshot_models first.")
+    cur = _read_gz_json(cur_path)["data"]
+    targets: list[str] = []
+
+    # 1) Latest top-N by usage. Rankings use the canonical slug, so map it to the id.
+    by_canonical: dict[str, str] = {}
+    for m in cur:
+        by_canonical.setdefault(_base(m.get("canonical_slug") or m["id"]), _base(m["id"]))
+    rank_files = sorted((RAW / "rankings").glob("*.json.gz"))
+    if rank_files:
+        rows = _read_gz_json(rank_files[-1]).get("data", [])
+        if rows:
+            last_day = max(r["date"] for r in rows)
+            top = sorted((r for r in rows if r["date"] == last_day and r["model_permaslug"] != "other"),
+                         key=lambda r: float(r["total_tokens"]), reverse=True)[:ENDPOINTS_TOP_N]
+            targets += [by_canonical[_base(r["model_permaslug"])] for r in top
+                        if _base(r["model_permaslug"]) in by_canonical]
+
+    # 2) Listed price changed since the previous models snapshot.
+    earlier = [f for f in sorted((RAW / "models").glob("*.json.gz")) if f.name < cur_path.name]
+    if earlier:
+        old = {m["id"]: m.get("pricing") for m in _read_gz_json(earlier[-1])["data"]}
+        targets += [_base(m["id"]) for m in cur if m["id"] in old and old[m["id"]] != m.get("pricing")]
+
+    out: list[str] = []
+    for t in targets:
+        if "/" in t and t not in out:
+            out.append(t)
+    return out[:ENDPOINTS_MAX]
+
+
+def snapshot_endpoints(today: dt.date | None = None) -> Path:
+    """Save each target model's endpoints response unmodified. One failed model
+    is recorded under "errors" and does not stop the others."""
+    today = today or _utc_today()
+    targets = endpoint_targets(today)
+    responses: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    for mid in targets:
+        try:
+            responses[mid] = _get(f"{BASE_URL}/models/{mid}/endpoints", auth=True, retries=1)
+        except Exception as e:
+            errors[mid] = str(e)[:300]
+        time.sleep(0.5)
+    if targets and not responses:
+        raise RuntimeError(f"All {len(targets)} endpoint requests failed, e.g. {next(iter(errors.values()))}")
+    payload = {"_collected_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+               "models": responses, "errors": errors}
+    out = RAW / "endpoints" / f"{today.isoformat()}.json.gz"
+    _write_gz_json(out, payload)
+    print(f"[endpoints] {len(responses)} models ({len(errors)} failed) -> {out.relative_to(ROOT)}")
+    return out
+
+
 def daily() -> None:
     """Run once per day (GitHub Actions). Models snapshot + 7-day rankings
-    window; the overlap captures late restatements of recent days."""
+    window (the overlap captures late restatements of recent days) +
+    per-provider prices for the models chosen by endpoint_targets."""
     errors = []
     try:
         snapshot_models()
@@ -137,6 +217,10 @@ def daily() -> None:
         fetch_rankings(end - dt.timedelta(days=6), end)
     except Exception as e:
         errors.append(f"rankings: {e}")
+    try:
+        snapshot_endpoints()
+    except Exception as e:
+        errors.append(f"endpoints: {e}")
     if errors:
         # Non-zero exit makes the workflow fail -> GitHub emails the repo owner.
         print("COLLECTION ERRORS:\n  " + "\n  ".join(errors), file=sys.stderr)
@@ -148,6 +232,7 @@ def main(argv: list[str] | None = None) -> None:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("daily")
     sub.add_parser("models")
+    sub.add_parser("endpoints")
     b = sub.add_parser("backfill")
     b.add_argument("--start", type=dt.date.fromisoformat, default=DATASET_FLOOR)
     b.add_argument("--end", type=dt.date.fromisoformat, default=None)
@@ -156,6 +241,8 @@ def main(argv: list[str] | None = None) -> None:
         daily()
     elif a.cmd == "models":
         snapshot_models()
+    elif a.cmd == "endpoints":
+        snapshot_endpoints()
     else:
         backfill(a.start, a.end)
 
