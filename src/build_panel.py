@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BLEND_INPUT_SHARE = 0.75
 MIN_PRICE_CHANGE = 0.01      # |dlog p| below this is treated as rounding noise
 MAX_FFILL_DAYS = 3           # fill missed snapshot days up to this many days
+MIN_HOLD_DAYS = 7            # a price counts as stable only if it holds this many days (issue #2)
 
 
 def _read_gz(path: Path) -> dict:
@@ -150,22 +151,36 @@ def build_daily_prices(snaps: pd.DataFrame, manual_ev: pd.DataFrame,
 
 
 def detect_price_events(prices: pd.DataFrame, manual_ev: pd.DataFrame) -> pd.DataFrame:
+    """A price change counts only when the model moves from one stable price to
+    another. A price is stable when it holds for MIN_HOLD_DAYS days in a row.
+    Listed prices often jump for a few days and come back (see issue #2); those
+    short spells are treated as noise and skipped."""
     p = prices[(~prices.is_free) & prices.price_source.isin(["snapshot", "ffill", "manual"])]
-    p = p.sort_values(["permaslug", "date"])
+    p = p.sort_values(["permaslug", "date"]).copy()
     p["lp"] = np.log(p.price_blend)
-    p["prev_lp"] = p.groupby("permaslug").lp.shift()
-    p["prev_date"] = p.groupby("permaslug").date.shift()
-    ev = p[(p.lp - p.prev_lp).abs() > MIN_PRICE_CHANGE].copy()
-    ev = ev[(ev.date - ev.prev_date).dt.days <= MAX_FFILL_DAYS + 1]  # real neighbour, not a gap
+    g = p.groupby("permaslug")
+    # A run is a stretch of consecutive days at (about) the same price.
+    new_run = ((p.lp - g.lp.shift()).abs() > MIN_PRICE_CHANGE) | ((p.date - g.date.shift()).dt.days != 1)
+    p["run"] = new_run.astype(int).groupby(p.permaslug).cumsum()
+    runs = (p.groupby(["permaslug", "run"])
+              .agg(base_slug=("base_slug", "first"), start=("date", "min"), end=("date", "max"),
+                   days=("date", "size"), lp=("lp", "first"), price_source=("price_source", "first"))
+              .reset_index())
+    stable = runs[runs.days >= MIN_HOLD_DAYS].sort_values(["permaslug", "start"]).copy()
+    s = stable.groupby("permaslug")
+    stable["prev_lp"] = s.lp.shift()
+    stable["prev_end"] = s.end.shift()
+    ev = stable[((stable.lp - stable.prev_lp).abs() > MIN_PRICE_CHANGE)
+                & ((stable.start - stable.prev_end).dt.days <= MIN_HOLD_DAYS + 1)].copy()
+    ev["date"] = ev.start
     ev["dlogp"] = ev.lp - ev.prev_lp
     ev["p_before"] = np.exp(ev.prev_lp)
-    ev["p_after"] = ev.price_blend
+    ev["p_after"] = np.exp(ev.lp)
     ev["source"] = np.where(ev.price_source == "manual", "manual", "snapshot")
     cols = ["permaslug", "base_slug", "date", "p_before", "p_after", "dlogp", "source"]
-    ev = ev[cols]
-    # manual events that fall inside the snapshot period are already captured;
-    # manual events before it are captured via the 'manual' price_source above.
-    return ev.sort_values("date").reset_index(drop=True)
+    # manual events before the first snapshot are captured via the 'manual'
+    # price_source rows that build_daily_prices reconstructs.
+    return ev[cols].sort_values("date").reset_index(drop=True)
 
 
 def detect_free_events(snaps: pd.DataFrame) -> pd.DataFrame:
