@@ -103,3 +103,43 @@ def test_price_events_skip_short_spells():
     assert len(ev) == 1
     assert ev.date.iloc[0] == pd.Timestamp("2026-11-21")
     assert abs(ev.dlogp.iloc[0] - math.log(0.6)) < 1e-9
+
+
+# Issue #21: per-provider prices are saved unmodified for the latest top models
+# and for models whose listed price changed; one failing model does not stop the rest.
+def test_collect_endpoints_saves_raw_and_skips_failures(tmp_path, monkeypatch):
+    monkeypatch.setattr(collect, "RAW", tmp_path)
+    monkeypatch.setattr(collect, "ROOT", tmp_path)
+    monkeypatch.setattr(collect.time, "sleep", lambda s: None)
+
+    def write(path, payload):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with gzip.open(path, "wt") as f:
+            json.dump(payload, f)
+
+    def model(mid, price):
+        return {"id": mid, "canonical_slug": f"{mid}-2026", "pricing": {"prompt": price, "completion": price}}
+
+    write(tmp_path / "models" / "2026-11-09.json.gz",
+          {"data": [model("a/top", "1"), model("b/moved", "1"), model("c/same", "1")]})
+    write(tmp_path / "models" / "2026-11-10.json.gz",
+          {"data": [model("a/top", "1"), model("b/moved", "2"), model("c/same", "1")]})
+    write(tmp_path / "rankings" / "2026-11-10_2026-11-09_2026-11-09.json.gz",
+          {"data": [{"date": "2026-11-09", "model_permaslug": "a/top-2026", "total_tokens": "100"},
+                    {"date": "2026-11-09", "model_permaslug": "other", "total_tokens": "999"}],
+           "meta": {}})
+    fake = {"data": {"id": "a/top", "endpoints": [{"provider_name": "X", "pricing": {"prompt": "1"}}]}}
+
+    def fake_get(url, *a, **k):
+        if "b/moved" in url:
+            raise RuntimeError("boom")
+        return dict(fake)
+
+    monkeypatch.setattr(collect, "_get", fake_get)
+    out = collect.snapshot_endpoints(pd.Timestamp("2026-11-10").date())
+    with gzip.open(out, "rt") as f:
+        saved = json.load(f)
+    assert saved["models"] == {"a/top": fake}           # top model, saved unmodified
+    assert list(saved["errors"]) == ["b/moved"]         # price changed, request failed
+    assert "c/same" not in saved["models"]              # neither top nor changed
+    assert "_collected_at" in saved
