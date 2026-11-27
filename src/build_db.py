@@ -10,8 +10,8 @@ Tables:
     market     total tokens per day (top 50 + "other")
     panel      usage joined to prices and market, with logs (snapshot days only;
                build_panel.py still fills the days before and between snapshots)
-    price_changes  paid models whose blended price moved by more than 1% between
-               neighbouring snapshots (same rule as build_panel.detect_price_events)
+    price_changes  paid models that moved from one stable price (held 7+ days) to
+               another (same rule as build_panel.detect_price_events)
 
     python -m src.build_db
     python -m src.build_db --raw data_demo/raw --out data_demo/processed/llm.duckdb
@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parents[1]
 BLEND_INPUT_SHARE = 0.75     # same 3:1 input:output mix as build_panel.py
 MIN_PRICE_CHANGE = 0.01      # |dlog p| below this is rounding noise (as in build_panel.py)
 MAX_GAP_DAYS = 4             # snapshots further apart are not neighbours (MAX_FFILL_DAYS + 1)
+MIN_HOLD_DAYS = 7            # a price counts as stable only if it holds this many days (issue #2)
 
 
 def build_db(raw: Path, out: Path) -> duckdb.DuckDBPyConnection:
@@ -116,32 +117,60 @@ def build_db(raw: Path, out: Path) -> duckdb.DuckDBPyConnection:
         WHERE u.permaslug <> 'other'
     """)
 
-    # Price changes: compare each snapshot with the same model's previous one.
-    # LAG looks one row back within each model, ordered by date. Changes under
-    # 1% are rounding noise; a gap of more than 4 days is not a real neighbour.
+        # Price changes: a change counts only when a model moves from one stable
+    # price to another (issue #2). A run is a stretch of snapshots at about the
+    # same price with no gap over MAX_GAP_DAYS; a run is stable if it spans
+    # MIN_HOLD_DAYS days or more. Short spells in between are skipped as noise.
     con.sql(f"""
         CREATE OR REPLACE TABLE price_changes AS
         WITH paid AS (
-            SELECT date, permaslug, price_blend
+            SELECT date, permaslug, ln(price_blend) AS lp
             FROM prices
             WHERE variant <> 'free' AND price_blend > 0
         ),
-        with_prev AS (
+        flagged AS (
             SELECT
-                permaslug, date, price_blend,
-                LAG(date)        OVER (PARTITION BY permaslug ORDER BY date) AS prev_date,
-                LAG(price_blend) OVER (PARTITION BY permaslug ORDER BY date) AS prev_price
+                *,
+                CASE WHEN LAG(date) OVER w IS NULL
+                       OR date - LAG(date) OVER w > {MAX_GAP_DAYS}
+                       OR abs(lp - LAG(lp) OVER w) > {MIN_PRICE_CHANGE}
+                     THEN 1 ELSE 0 END AS new_run
             FROM paid
+            WINDOW w AS (PARTITION BY permaslug ORDER BY date)
+        ),
+        numbered AS (
+            SELECT *, sum(new_run) OVER (PARTITION BY permaslug ORDER BY date) AS run
+            FROM flagged
+        ),
+        runs AS (
+            SELECT
+                permaslug, run,
+                min(date)                 AS run_start,
+                max(date)                 AS run_end,
+                max(date) - min(date) + 1 AS days,
+                arg_min(lp, date)         AS lp
+            FROM numbered
+            GROUP BY permaslug, run
+        ),
+        stable AS (
+            SELECT
+                *,
+                LAG(lp)      OVER (PARTITION BY permaslug ORDER BY run_start) AS prev_lp,
+                LAG(run_end) OVER (PARTITION BY permaslug ORDER BY run_start) AS prev_end
+            FROM runs
+            WHERE days >= {MIN_HOLD_DAYS}
         )
         SELECT
-            permaslug, date, prev_date,
-            prev_price                       AS p_before,
-            price_blend                      AS p_after,
-            ln(price_blend) - ln(prev_price) AS dlogp
-        FROM with_prev
-        WHERE prev_price IS NOT NULL
-          AND abs(ln(price_blend) - ln(prev_price)) > {MIN_PRICE_CHANGE}
-          AND date - prev_date <= {MAX_GAP_DAYS}
+            permaslug,
+            run_start          AS date,
+            prev_end           AS prev_date,
+            exp(prev_lp)       AS p_before,
+            exp(lp)            AS p_after,
+            lp - prev_lp       AS dlogp
+        FROM stable
+        WHERE prev_lp IS NOT NULL
+          AND abs(lp - prev_lp) > {MIN_PRICE_CHANGE}
+          AND run_start - prev_end <= {MIN_HOLD_DAYS + 1}
         ORDER BY date, permaslug
     """)
 
