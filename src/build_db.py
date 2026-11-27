@@ -10,6 +10,8 @@ Tables:
     market     total tokens per day (top 50 + "other")
     panel      usage joined to prices and market, with logs (snapshot days only;
                build_panel.py still fills the days before and between snapshots)
+    price_changes  paid models whose blended price moved by more than 1% between
+               neighbouring snapshots (same rule as build_panel.detect_price_events)
 
     python -m src.build_db
     python -m src.build_db --raw data_demo/raw --out data_demo/processed/llm.duckdb
@@ -23,6 +25,8 @@ import duckdb
 
 ROOT = Path(__file__).resolve().parents[1]
 BLEND_INPUT_SHARE = 0.75     # same 3:1 input:output mix as build_panel.py
+MIN_PRICE_CHANGE = 0.01      # |dlog p| below this is rounding noise (as in build_panel.py)
+MAX_GAP_DAYS = 4             # snapshots further apart are not neighbours (MAX_FFILL_DAYS + 1)
 
 
 def build_db(raw: Path, out: Path) -> duckdb.DuckDBPyConnection:
@@ -112,10 +116,39 @@ def build_db(raw: Path, out: Path) -> duckdb.DuckDBPyConnection:
         WHERE u.permaslug <> 'other'
     """)
 
+    # Price changes: compare each snapshot with the same model's previous one.
+    # LAG looks one row back within each model, ordered by date. Changes under
+    # 1% are rounding noise; a gap of more than 4 days is not a real neighbour.
+    con.sql(f"""
+        CREATE OR REPLACE TABLE price_changes AS
+        WITH paid AS (
+            SELECT date, permaslug, price_blend
+            FROM prices
+            WHERE variant <> 'free' AND price_blend > 0
+        ),
+        with_prev AS (
+            SELECT
+                permaslug, date, price_blend,
+                LAG(date)        OVER (PARTITION BY permaslug ORDER BY date) AS prev_date,
+                LAG(price_blend) OVER (PARTITION BY permaslug ORDER BY date) AS prev_price
+            FROM paid
+        )
+        SELECT
+            permaslug, date, prev_date,
+            prev_price                       AS p_before,
+            price_blend                      AS p_after,
+            ln(price_blend) - ln(prev_price) AS dlogp
+        FROM with_prev
+        WHERE prev_price IS NOT NULL
+          AND abs(ln(price_blend) - ln(prev_price)) > {MIN_PRICE_CHANGE}
+          AND date - prev_date <= {MAX_GAP_DAYS}
+        ORDER BY date, permaslug
+    """)
+
     n_raw = con.sql("SELECT count(*) FROM usage_raw").fetchall()[0][0]
     n = con.sql("SELECT count(*) FROM usage").fetchall()[0][0]
     print(f"[db] usage: {n:,} rows ({n_raw - n:,} restated duplicates dropped) -> {out}")
-    for t in ["prices", "market", "panel"]:
+    for t in ["prices", "market", "panel", "price_changes"]:
         print(f"[db] {t}: {con.sql(f'SELECT count(*) FROM {t}').fetchall()[0][0]:,} rows")
     return con
 
