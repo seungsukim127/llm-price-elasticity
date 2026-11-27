@@ -1,6 +1,7 @@
 """End-to-end check: estimators must recover parameters planted in synthetic data."""
 import gzip
 import json
+import math
 
 import pandas as pd
 import pytest
@@ -89,3 +90,16 @@ def test_site_builds_from_synthetic_data(tmp_path):
     assert len(data["top"]) == 20
     assert abs(sum(s["values"][-1] for s in data["share"]["series"]) - 100) < 0.5
     assert (tmp_path / "_site" / "chart.umd.min.js").exists()
+
+
+# Issue #2: a short price spell that comes back is noise; only a move from one
+# stable price (held 7+ days) to another counts as a price change.
+def test_price_events_skip_short_spells():
+    dates = pd.date_range("2026-11-01", periods=30, freq="D")
+    price = [1.0] * 10 + [0.5] * 2 + [1.0] * 8 + [0.6] * 10
+    prices = pd.DataFrame({"permaslug": "a/b", "base_slug": "a/b", "date": dates,
+                           "price_blend": price, "price_source": "snapshot", "is_free": False})
+    ev = build_panel.detect_price_events(prices, pd.DataFrame())
+    assert len(ev) == 1
+    assert ev.date.iloc[0] == pd.Timestamp("2026-11-21")
+    assert abs(ev.dlogp.iloc[0] - math.log(0.6)) < 1e-9
